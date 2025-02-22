@@ -487,7 +487,7 @@ class VPPLoader extends Loader {
         buildHeatmapTexture(this);
     }
 
-    setAllowMetalic(allow) {
+    setAllowMetallic(allow) {
         this.allowMetalic = allow;
         buildHeatmapTexture(this);
     }
