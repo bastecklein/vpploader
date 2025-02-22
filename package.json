@@ -1,0 +1,34 @@
+{
+    "name": "vpploader",
+    "version": "1.0.0",
+    "description": "threejs loader for Voxel Paint (.vpp) files",
+    "keywords": ["threejs", "loader", "vpp", "voxel paint", "library", "ape apps", "module"],
+    "homepage": "https://www.ape-apps.com",
+    "bugs": {
+        "email": "support@ape-apps.com"
+    },
+    "author": {
+        "name": "Ape Apps",
+        "email": "support@ape-apps.com",
+        "url": "https://www.ape-apps.com"
+    },
+    "funding": {
+        "type": "patreon",
+        "url": "https://www.patreon.com/apeapps"
+    },
+    "license": "Apache-2.0",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/bastecklein/vpploader"
+    },
+    "main": "vpploader.js",
+    "config": {},
+    "dependencies": {
+        "three": "*",
+        "compressionhelper": "git+ssh://git@github.com:bastecklein/compressionhelper.git#main",
+        "common-helpers": "git+ssh://git@github.com:bastecklein/common-helpers.git#main"
+    },
+    "devDependencies": {},
+    "private": false,
+    "type": "module"
+}
