@@ -447,13 +447,8 @@ class VPPLoader extends Loader {
             url = options.url;
         }
 
-        console.log(options);
-
         if(options.obj) {
             getMesh(scope, options.obj, options).then(function(buildData) {
-
-                console.log(buildData);
-
                 onLoad(scope.parse(buildData));
             });
 
