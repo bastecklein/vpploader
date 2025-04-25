@@ -442,9 +442,9 @@ class VPPLoader extends Loader {
 
         let options = {};
 
-        if(typeof url === "object" && (url.url || url.obj)) {
+        if(typeof url === "object" && (url.url || url.obj || url.path)) {
             options = url;
-            url = options.url;
+            url = options.url || options.path;
         }
 
         if(options.obj) {
