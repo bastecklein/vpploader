@@ -643,10 +643,11 @@ async function buildGeometry(scope, vppObj, colorReplacements, scale) {
     }
 
     const newLights = JSON.parse(JSON.stringify(precompile.lights));
+    const newReg = JSON.parse(JSON.stringify(precompile.reg));
 
     for(let i = 0; i < colorReplacements.length; i++) {
         const cr = colorReplacements[i];
-        doPrecompileColorSwap(cr.to, precompile.reg.colors, cr.from);
+        doPrecompileColorSwap(cr.to, newReg.colors, cr.from);
     }
 
     for(let i = 0; i < newLights.length; i++) {
@@ -661,7 +662,7 @@ async function buildGeometry(scope, vppObj, colorReplacements, scale) {
         }
     }
 
-    const finalData = getGeometryFromPrecompileData(scope, precompile.reg, scale);
+    const finalData = getGeometryFromPrecompileData(scope, newReg, scale);
 
     return {
         geometry: finalData,
