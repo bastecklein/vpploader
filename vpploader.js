@@ -504,6 +504,21 @@ class VPPMesh extends Mesh {
         this.lights = buildData.lights;
         this.emitters = buildData.emitters;
     }
+
+    setOpacity(opacity) {
+        if(opacity == this.material.opacity) {
+            return;
+        }
+
+        this.material = this.material.clone();
+        this.material.opacity = opacity;
+
+        if(opacity == 1) {
+            this.material.transparent = false;
+        } else {
+            this.material.transparent = true;
+        }
+    }
 }
 
 class PrecompileData {
@@ -621,13 +636,18 @@ function asyncWait(timeout) {
 }
 
 async function buildGeometry(scope, vppObj, colorReplacements, scale) {
-    const precompile = await getCompiledGeometryData(vppObj);
+    const precompile = await getCompiledGeometryData(vppObj, colorReplacements);
 
     if(!precompile) {
         return null;
     }
 
     const newLights = JSON.parse(JSON.stringify(precompile.lights));
+
+    for(let i = 0; i < colorReplacements.length; i++) {
+        const cr = colorReplacements[i];
+        doPrecompileColorSwap(cr.to, precompile.reg.colors, cr.from);
+    }
 
     for(let i = 0; i < newLights.length; i++) {
         const light = newLights[i];
@@ -813,7 +833,7 @@ function generateVPPGeometryData(vppObj) {
                             for (const {pos, uv} of corners) {
                                 useObj.positions.push(pos[0] + x, pos[1] + y, pos[2] + z);
                                 useObj.normals.push(...dir);
-                                useObj.colors.push(finalColor.r,finalColor.g,finalColor.b);
+                                useObj.colors.push(finalColor.r, finalColor.g, finalColor.b);
 
                                 const uvy = 1 - (0 + 1 - uv[1]);
 
@@ -1030,6 +1050,31 @@ function buildHeatmapTexture(scope) {
                     "\n" + metOnlyReplace + "\n\n"
                 );
             };
+        }
+    }
+}
+
+function doPrecompileColorSwap(color, arr, sourceColor = "#ff00ff") {
+    const check = new Color(sourceColor);
+    const sw = new Color(color);
+
+    const cR = check.r;
+    const cG = check.g;
+    const cB = check.b;
+
+    const sR = sw.r;
+    const sG = sw.g;
+    const sB = sw.b;
+
+    for(let i = 0; i < arr.length; i+= 3) {
+        const aR = arr[i];
+        const aG = arr[i + 1];
+        const aB = arr[i + 2];
+
+        if(aR == cR && aG == cG && aB == cB) {
+            arr[i] = sR;
+            arr[i + 1] = sG;
+            arr[i + 2] = sB;
         }
     }
 }
