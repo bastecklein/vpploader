@@ -636,7 +636,7 @@ function asyncWait(timeout) {
 }
 
 async function buildGeometry(scope, vppObj, colorReplacements, scale) {
-    const precompile = await getCompiledGeometryData(vppObj, colorReplacements);
+    const precompile = await getCompiledGeometryData(vppObj);
 
     if(!precompile) {
         return null;
