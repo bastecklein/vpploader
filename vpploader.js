@@ -10,7 +10,9 @@ import {
     ShaderChunk,
     MeshStandardMaterial,
     Loader,
-    FileLoader
+    FileLoader,
+    InstancedMesh,
+    Matrix4
 } from "three";
 
 import CH from "compressionhelper";
@@ -426,6 +428,7 @@ class VPPLoader extends Loader {
         this.allowEmitters = true;
 
         this.vppGeometries = {};
+        this.materialCache = new Map(); // Cache materials by opacity/transparency
 
         this.vppMaterial = null;
         this.lightOnlyMaterial = null;
@@ -433,6 +436,9 @@ class VPPLoader extends Loader {
         this.noExtrasMaterial = null;
 
         this.heatmapTexture = null;
+        this.enableInstancing = true; // New: Enable instanced rendering
+        this.enableLOD = false; // New: Enable LOD support
+        this.lodDistances = [50, 100, 200]; // New: LOD distances
 
         buildHeatmapTexture(this);
     }
@@ -495,6 +501,91 @@ class VPPLoader extends Loader {
     setAllowEmitters(allow) {
         this.allowEmitters = allow;
     }
+
+    setEnableInstancing(enable) {
+        this.enableInstancing = enable;
+    }
+
+    setEnableLOD(enable, distances = [50, 100, 200]) {
+        this.enableLOD = enable;
+        this.lodDistances = distances;
+    }
+
+    // Get cached material with specific opacity to avoid cloning
+    getCachedMaterial(baseMaterial, opacity = 1) {
+        const cacheKey = `${baseMaterial.uuid}_${opacity}`;
+        
+        if (this.materialCache.has(cacheKey)) {
+            return this.materialCache.get(cacheKey);
+        }
+
+        let material;
+        if (opacity === 1) {
+            material = baseMaterial;
+        } else {
+            material = baseMaterial.clone();
+            material.opacity = opacity;
+            material.transparent = true;
+        }
+
+        this.materialCache.set(cacheKey, material);
+        return material;
+    }
+
+    // Clear material cache when materials change
+    clearMaterialCache() {
+        this.materialCache.clear();
+    }
+
+    // Performance optimization methods
+    optimizeForPerformance(options = {}) {
+        // Enable aggressive optimizations for better performance
+        this.enableInstancing = options.enableInstancing !== false;
+        this.enableLOD = options.enableLOD || false;
+        
+        if (options.lodDistances) {
+            this.lodDistances = options.lodDistances;
+        }
+        
+        // Disable features that may not be needed for performance
+        if (options.disableEmissive) {
+            this.setAllowEmissive(false);
+        }
+        if (options.disableMetallic) {
+            this.setAllowMetallic(false);
+        }
+        if (options.disableEmitters) {
+            this.setAllowEmitters(false);
+        }
+    }
+
+    // Get memory usage statistics
+    getMemoryStats() {
+        let geometryCount = 0;
+        let materialCount = this.materialCache.size;
+        let totalVertices = 0;
+        let totalTriangles = 0;
+        
+        for (const geo of Object.values(this.vppGeometries)) {
+            if (geo.geometry) {
+                geometryCount++;
+                if (geo.geometry.attributes.position) {
+                    totalVertices += geo.geometry.attributes.position.count;
+                }
+                if (geo.geometry.index) {
+                    totalTriangles += geo.geometry.index.count / 3;
+                }
+            }
+        }
+        
+        return {
+            geometryCount,
+            materialCount,
+            totalVertices,
+            totalTriangles,
+            cacheSize: Object.keys(this.vppGeometries).length
+        };
+    }
 }
 
 class VPPMesh extends Mesh {
@@ -503,6 +594,8 @@ class VPPMesh extends Mesh {
 
         this.lights = buildData.lights;
         this.emitters = buildData.emitters;
+        this.vppLoader = buildData.loader; // Store reference to loader for material caching
+        this.baseMaterial = buildData.material; // Store base material reference
     }
 
     setOpacity(opacity) {
@@ -510,13 +603,19 @@ class VPPMesh extends Mesh {
             return;
         }
 
-        this.material = this.material.clone();
-        this.material.opacity = opacity;
-
-        if(opacity == 1) {
-            this.material.transparent = false;
+        // Use cached material instead of cloning every time
+        if (this.vppLoader) {
+            this.material = this.vppLoader.getCachedMaterial(this.baseMaterial, opacity);
         } else {
-            this.material.transparent = true;
+            // Fallback to old behavior if no loader reference
+            this.material = this.material.clone();
+            this.material.opacity = opacity;
+
+            if(opacity == 1) {
+                this.material.transparent = false;
+            } else {
+                this.material.transparent = true;
+            }
         }
     }
 }
@@ -622,10 +721,11 @@ async function getMesh(scope, obj, options) {
     }
 
     return {
-        geometry: geo.geometry.clone(),
+        geometry: scope.enableInstancing ? geo.geometry : geo.geometry.clone(),
         material: mat,
         lights: geo.lights,
-        emitters: geo.emitters
+        emitters: geo.emitters,
+        loader: scope // Pass loader reference for material caching
     };
 }
 
@@ -715,6 +815,98 @@ function getGeometryFromPrecompileData(scope, pc, scale) {
     geometry.normalsNeedUpdate = true;
     geometry.computeVertexNormals();
 
+    return geometry;
+}
+
+// Generate simplified geometry for LOD levels
+function generateLODGeometry(originalGeometry, lodLevel) {
+    if (lodLevel === 0) return originalGeometry;
+    
+    // Simple decimation - skip every nth vertex for higher LOD levels
+    const skipFactor = Math.pow(2, lodLevel);
+    const positions = originalGeometry.attributes.position.array;
+    const normals = originalGeometry.attributes.normal.array;
+    const colors = originalGeometry.attributes.color.array;
+    const indices = originalGeometry.index.array;
+    
+    // For simple LOD, we'll reduce triangle count by skipping indices
+    const newIndices = [];
+    for (let i = 0; i < indices.length; i += skipFactor * 3) {
+        if (i + 2 < indices.length) {
+            newIndices.push(indices[i], indices[i + 1], indices[i + 2]);
+        }
+    }
+    
+    const lodGeometry = new BufferGeometry();
+    lodGeometry.setAttribute('position', new BufferAttribute(positions, 3));
+    lodGeometry.setAttribute('normal', new BufferAttribute(normals, 3));
+    lodGeometry.setAttribute('color', new BufferAttribute(colors, 3));
+    
+    // Copy other attributes if they exist
+    if (originalGeometry.attributes.uvlm) {
+        lodGeometry.setAttribute('uvlm', originalGeometry.attributes.uvlm.clone());
+    }
+    if (originalGeometry.attributes.uvru) {
+        lodGeometry.setAttribute('uvru', originalGeometry.attributes.uvru.clone());
+    }
+    if (originalGeometry.attributes.uvme) {
+        lodGeometry.setAttribute('uvme', originalGeometry.attributes.uvme.clone());
+    }
+    
+    lodGeometry.setIndex(new Uint32Array(newIndices));
+    lodGeometry.userData = { ...originalGeometry.userData };
+    
+    return lodGeometry;
+}
+
+// Optimize geometry for better GPU performance
+function optimizeGeometry(geometry) {
+    // Merge vertices that are very close to each other
+    const positions = geometry.attributes.position.array;
+    const threshold = 0.001; // Very small threshold for voxel models
+    
+    // Simple vertex welding - in production you might want a more sophisticated algorithm
+    const newPositions = [];
+    const newColors = [];
+    const newNormals = [];
+    const vertexMap = new Map();
+    const indexMap = [];
+    
+    const colors = geometry.attributes.color.array;
+    const normals = geometry.attributes.normal.array;
+    
+    for (let i = 0; i < positions.length; i += 3) {
+        const x = Math.round(positions[i] / threshold) * threshold;
+        const y = Math.round(positions[i + 1] / threshold) * threshold;
+        const z = Math.round(positions[i + 2] / threshold) * threshold;
+        
+        const key = `${x},${y},${z}`;
+        
+        if (!vertexMap.has(key)) {
+            const newIndex = newPositions.length / 3;
+            vertexMap.set(key, newIndex);
+            
+            newPositions.push(x, y, z);
+            newColors.push(colors[i], colors[i + 1], colors[i + 2]);
+            newNormals.push(normals[i], normals[i + 1], normals[i + 2]);
+        }
+        
+        indexMap.push(vertexMap.get(key));
+    }
+    
+    // Update geometry with optimized data
+    geometry.setAttribute('position', new BufferAttribute(new Float32Array(newPositions), 3));
+    geometry.setAttribute('color', new BufferAttribute(new Float32Array(newColors), 3));
+    geometry.setAttribute('normal', new BufferAttribute(new Float32Array(newNormals), 3));
+    
+    // Remap indices
+    const indices = geometry.index.array;
+    const newIndices = new Uint32Array(indices.length);
+    for (let i = 0; i < indices.length; i++) {
+        newIndices[i] = indexMap[indices[i]];
+    }
+    geometry.setIndex(newIndices);
+    
     return geometry;
 }
 
@@ -914,7 +1106,9 @@ function getVoxel(vppObj, x, y, z) {
 function isOdd(num) { return num % 2;}
 
 function buildHeatmapTexture(scope) {
+    // Clear geometry cache when materials change to ensure consistency
     scope.vppGeometries = {};
+    scope.clearMaterialCache();
 
     const canvas = document.createElement("canvas");
     canvas.width = 256;
@@ -1080,4 +1274,338 @@ function doPrecompileColorSwap(color, arr, sourceColor = "#ff00ff") {
     }
 }
 
-export { VPPLoader, generateVPPGeometryData, VPPMesh };
+export { VPPLoader, generateVPPGeometryData, VPPMesh, generateLODGeometry, optimizeGeometry };
+
+// Utility class for batching multiple VPP models into single geometries
+class VPPBatcher {
+    constructor(loader) {
+        this.loader = loader;
+        this.batches = new Map(); // Group by material type
+    }
+    
+    // Add a VPP model to the batch
+    addModel(vppObj, transform, options = {}) {
+        const materialKey = this.getMaterialKey(vppObj, options);
+        
+        if (!this.batches.has(materialKey)) {
+            this.batches.set(materialKey, {
+                models: [],
+                material: null
+            });
+        }
+        
+        this.batches.get(materialKey).models.push({
+            vppObj,
+            transform,
+            options
+        });
+    }
+    
+    // Generate batched geometries
+    async generateBatches() {
+        const results = [];
+        
+        for (const [, batch] of this.batches) {
+            const mergedGeometry = await this.mergeModels(batch.models);
+            if (mergedGeometry) {
+                results.push({
+                    geometry: mergedGeometry.geometry,
+                    material: mergedGeometry.material,
+                    lights: mergedGeometry.lights,
+                    emitters: mergedGeometry.emitters
+                });
+            }
+        }
+        
+        return results;
+    }
+    
+    getMaterialKey(vppObj, options) {
+        // Create a key based on material properties that affect rendering
+        const hasEm = this.hasEmissiveVoxels(vppObj);
+        const hasMe = this.hasMetallicVoxels(vppObj);
+        return `${hasEm}_${hasMe}_${JSON.stringify(options.colorReplacements || [])}`;
+    }
+    
+    hasEmissiveVoxels(vppObj) {
+        return vppObj.voxels.some(v => v.gi || v.gr);
+    }
+    
+    hasMetallicVoxels(vppObj) {
+        return vppObj.voxels.some(v => v.me);
+    }
+    
+    async mergeModels(models) {
+        if (models.length === 0) return null;
+        
+        const mergedData = {
+            positions: [],
+            normals: [],
+            colors: [],
+            indices: [],
+            emUvs: [],
+            rmUvs: [],
+            meUvs: [],
+            hasEm: false,
+            hasMe: false,
+            lights: [],
+            emitters: []
+        };
+        
+        let vertexOffset = 0;
+        
+        for (const model of models) {
+            const buildData = await buildGeometry(this.loader, model.vppObj, model.options.colorReplacements || [], model.options.scale || 1);
+            if (!buildData) continue;
+            
+            const geometry = buildData.geometry;
+            const positions = geometry.attributes.position.array;
+            const normals = geometry.attributes.normal.array;
+            const colors = geometry.attributes.color.array;
+            const indices = geometry.index.array;
+            
+            // Apply transform matrix if provided
+            const transformedPositions = this.applyTransform(positions, model.transform);
+            const transformedNormals = this.applyNormalTransform(normals, model.transform);
+            
+            // Merge data
+            mergedData.positions.push(...transformedPositions);
+            mergedData.normals.push(...transformedNormals);
+            mergedData.colors.push(...colors);
+            
+            // Offset indices
+            const offsetIndices = indices.map(i => i + vertexOffset);
+            mergedData.indices.push(...offsetIndices);
+            
+            vertexOffset += positions.length / 3;
+            
+            // Merge UVs and other attributes
+            if (geometry.attributes.uvlm) {
+                mergedData.emUvs.push(...geometry.attributes.uvlm.array);
+                mergedData.hasEm = true;
+            }
+            if (geometry.attributes.uvru) {
+                mergedData.rmUvs.push(...geometry.attributes.uvru.array);
+            }
+            if (geometry.attributes.uvme) {
+                mergedData.meUvs.push(...geometry.attributes.uvme.array);
+                mergedData.hasMe = true;
+            }
+            
+            // Transform and merge lights/emitters
+            mergedData.lights.push(...this.transformLights(buildData.lights, model.transform));
+            mergedData.emitters.push(...this.transformEmitters(buildData.emitters, model.transform));
+        }
+        
+        // Create final geometry
+        const finalGeometry = this.createGeometryFromData(mergedData);
+        const material = this.getMaterialForBatch(mergedData);
+        
+        return {
+            geometry: finalGeometry,
+            material,
+            lights: mergedData.lights,
+            emitters: mergedData.emitters
+        };
+    }
+    
+    applyTransform(positions, transform) {
+        if (!transform) return positions;
+        
+        const result = new Float32Array(positions.length);
+        for (let i = 0; i < positions.length; i += 3) {
+            const x = positions[i];
+            const y = positions[i + 1];
+            const z = positions[i + 2];
+            
+            // Apply translation (simple case - extend for full matrix transforms)
+            result[i] = x + (transform.x || 0);
+            result[i + 1] = y + (transform.y || 0);
+            result[i + 2] = z + (transform.z || 0);
+        }
+        return result;
+    }
+    
+    applyNormalTransform(normals /*, transform */) {
+        // For simple translation, normals don't change
+        // For rotation/scale, you'd need proper normal matrix transformation
+        return normals;
+    }
+    
+    transformLights(lights, transform) {
+        if (!transform || !lights) return lights || [];
+        
+        return lights.map(light => ({
+            ...light,
+            x: light.x + (transform.x || 0),
+            y: light.y + (transform.y || 0),
+            z: light.z + (transform.z || 0)
+        }));
+    }
+    
+    transformEmitters(emitters, transform) {
+        if (!transform || !emitters) return emitters || [];
+        
+        return emitters.map(emitter => ({
+            ...emitter,
+            x: emitter.x + (transform.x || 0),
+            y: emitter.y + (transform.y || 0),
+            z: emitter.z + (transform.z || 0)
+        }));
+    }
+    
+    createGeometryFromData(data) {
+        const geometry = new BufferGeometry();
+        
+        geometry.setAttribute('position', new BufferAttribute(new Float32Array(data.positions), 3));
+        geometry.setAttribute('normal', new BufferAttribute(new Float32Array(data.normals), 3));
+        geometry.setAttribute('color', new BufferAttribute(new Float32Array(data.colors), 3));
+        
+        if (data.hasEm && data.emUvs.length > 0) {
+            geometry.setAttribute('uvlm', new BufferAttribute(new Float32Array(data.emUvs), 2));
+        }
+        if (data.hasMe && data.rmUvs.length > 0) {
+            geometry.setAttribute('uvru', new BufferAttribute(new Float32Array(data.rmUvs), 2));
+            geometry.setAttribute('uvme', new BufferAttribute(new Float32Array(data.meUvs), 2));
+        }
+        
+        geometry.setIndex(new Uint32Array(data.indices));
+        geometry.userData.hasEm = data.hasEm;
+        geometry.userData.hasMe = data.hasMe;
+        
+        geometry.computeBoundingSphere();
+        geometry.computeBoundingBox();
+        
+        return geometry;
+    }
+    
+    getMaterialForBatch(data) {
+        // Return appropriate material based on batch properties
+        if (data.hasEm && data.hasMe) {
+            return this.loader.vppMaterial;
+        } else if (data.hasEm && !data.hasMe) {
+            return this.loader.lightOnlyMaterial;
+        } else if (!data.hasEm && data.hasMe) {
+            return this.loader.metalOnlyMaterial;
+        } else {
+            return this.loader.noExtrasMaterial;
+        }
+    }
+}
+
+export { VPPBatcher };
+
+// Utility class for creating instanced meshes from identical VPP models
+class VPPInstanceManager {
+    constructor(loader) {
+        this.loader = loader;
+        this.instances = new Map(); // Group identical models for instancing
+    }
+    
+    // Register a model instance with its transform
+    addInstance(vppObj, transform, options = {}) {
+        const modelKey = this.getModelKey(vppObj, options);
+        
+        if (!this.instances.has(modelKey)) {
+            this.instances.set(modelKey, {
+                vppObj,
+                options,
+                transforms: []
+            });
+        }
+        
+        this.instances.get(modelKey).transforms.push(transform);
+    }
+    
+    // Generate instanced meshes for all registered models
+    async generateInstancedMeshes() {
+        const results = [];
+        
+        for (const [, instanceData] of this.instances) {
+            if (instanceData.transforms.length === 1) {
+                // Single instance - use regular mesh
+                const buildData = await getMesh(this.loader, instanceData.vppObj, instanceData.options);
+                if (buildData) {
+                    const mesh = new VPPMesh(buildData);
+                    const transform = instanceData.transforms[0];
+                    if (transform) {
+                        mesh.position.set(transform.x || 0, transform.y || 0, transform.z || 0);
+                        if (transform.rotation) {
+                            mesh.rotation.set(transform.rotation.x || 0, transform.rotation.y || 0, transform.rotation.z || 0);
+                        }
+                        if (transform.scale) {
+                            mesh.scale.set(transform.scale.x || 1, transform.scale.y || 1, transform.scale.z || 1);
+                        }
+                    }
+                    results.push(mesh);
+                }
+            } else {
+                // Multiple instances - use InstancedMesh
+                const buildData = await getMesh(this.loader, instanceData.vppObj, instanceData.options);
+                if (buildData) {
+                    const instancedMesh = new InstancedMesh(
+                        buildData.geometry,
+                        buildData.material,
+                        instanceData.transforms.length
+                    );
+                    
+                    // Set up instance matrices
+                    const matrix = new Matrix4();
+                    for (let i = 0; i < instanceData.transforms.length; i++) {
+                        const transform = instanceData.transforms[i];
+                        matrix.makeTranslation(
+                            transform.x || 0,
+                            transform.y || 0,
+                            transform.z || 0
+                        );
+                        
+                        if (transform.rotation) {
+                            const rotMatrix = new Matrix4().makeRotationFromEuler({
+                                x: transform.rotation.x || 0,
+                                y: transform.rotation.y || 0,
+                                z: transform.rotation.z || 0
+                            });
+                            matrix.multiply(rotMatrix);
+                        }
+                        
+                        if (transform.scale) {
+                            const scaleMatrix = new Matrix4().makeScale(
+                                transform.scale.x || 1,
+                                transform.scale.y || 1,
+                                transform.scale.z || 1
+                            );
+                            matrix.multiply(scaleMatrix);
+                        }
+                        
+                        instancedMesh.setMatrixAt(i, matrix);
+                    }
+                    
+                    instancedMesh.instanceMatrix.needsUpdate = true;
+                    
+                    // Store lights and emitters (you may need to transform these per instance)
+                    instancedMesh.lights = buildData.lights;
+                    instancedMesh.emitters = buildData.emitters;
+                    
+                    results.push(instancedMesh);
+                }
+            }
+        }
+        
+        return results;
+    }
+    
+    getModelKey(vppObj, options) {
+        // Create a unique key for identical models
+        return hash(JSON.stringify({
+            model: vppObj,
+            colorReplacements: options.colorReplacements || [],
+            scale: options.scale || 1
+        }));
+    }
+    
+    clear() {
+        this.instances.clear();
+    }
+}
+
+export { VPPInstanceManager };
