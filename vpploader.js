@@ -26,6 +26,7 @@ const MODEL_NEW_LIGHTING_CUTOFF = 1696771084976;
 
 const decompressedGeometries = {};
 const remoteModels = {};
+const modelHashCache = new WeakMap();
 
 const UV_TEXT_MIN = 0.02;
 const UV_TEXT_MAX = 0.98;
@@ -656,7 +657,7 @@ async function getMesh(scope, obj, options) {
         }
     }
 
-    const refName = hash(JSON.stringify(obj) + JSON.stringify(options));
+    const refName = getMeshRefName(obj, options, colorReplacements, scale);
 
     let geo = null;
     let needsLoad = false;
@@ -727,6 +728,50 @@ async function getMesh(scope, obj, options) {
         emitters: geo.emitters,
         loader: scope // Pass loader reference for material caching
     };
+}
+
+function getMeshRefName(obj, options, colorReplacements, scale) {
+    if(options && options.cacheKey) {
+        return options.cacheKey;
+    }
+
+    const objHash = getVPPObjectHash(obj);
+    const optionKey = getMeshOptionKey(options, colorReplacements, scale);
+
+    return hash(objHash + "|" + optionKey);
+}
+
+function getVPPObjectHash(vppObj) {
+    if(vppObj && typeof vppObj === "object") {
+        if(modelHashCache.has(vppObj)) {
+            return modelHashCache.get(vppObj);
+        }
+
+        const cachedHash = hash(JSON.stringify(vppObj));
+        modelHashCache.set(vppObj, cachedHash);
+
+        return cachedHash;
+    }
+
+    return hash(JSON.stringify(vppObj));
+}
+
+function getMeshOptionKey(options, colorReplacements, scale) {
+    const replacements = [];
+
+    if(colorReplacements && colorReplacements.length > 0) {
+        for(let i = 0; i < colorReplacements.length; i++) {
+            const replacement = colorReplacements[i];
+
+            replacements.push((replacement.from || "") + ">" + (replacement.to || ""));
+        }
+    }
+
+    const useBasic = options && options.useBasic ? "1" : "0";
+    const useLights = options && options.useLights ? "1" : "0";
+    const opacity = options && options.opacity != null ? options.opacity : 1;
+
+    return scale + "|" + useBasic + "|" + useLights + "|" + opacity + "|" + replacements.join(",");
 }
 
 function asyncWait(timeout) {
@@ -911,7 +956,7 @@ function optimizeGeometry(geometry) {
 }
 
 async function getCompiledGeometryData(vppObj) {
-    const geoHash = hash(JSON.stringify(vppObj));
+    const geoHash = getVPPObjectHash(vppObj);
 
     if(decompressedGeometries[geoHash]) {
         return decompressedGeometries[geoHash];
