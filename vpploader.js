@@ -12,7 +12,8 @@ import {
     Loader,
     FileLoader,
     InstancedMesh,
-    Matrix4
+    Matrix4,
+    MeshBasicMaterial
 } from "three";
 
 import CH from "compressionhelper";
@@ -435,6 +436,7 @@ class VPPLoader extends Loader {
         this.lightOnlyMaterial = null;
         this.metalOnlyMaterial = null;
         this.noExtrasMaterial = null;
+        this.basicMaterial = new MeshBasicMaterial({ vertexColors: true });
 
         this.heatmapTexture = null;
         this.enableInstancing = true; // New: Enable instanced rendering
@@ -704,6 +706,10 @@ async function getMesh(scope, obj, options) {
     }
 
     let mat = scope.vppMaterial;
+
+    if(options && options.useBasic) {
+        mat = scope.basicMaterial;
+    }
 
     if(geo.geometry.userData) {
         const ud = geo.geometry.userData;
